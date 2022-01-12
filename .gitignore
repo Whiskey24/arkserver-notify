@@ -1,0 +1,9 @@
+# Ignore everything
+*
+
+# But not these files...
+!.gitignore
+!arkserver-notify.py
+!config-default.py
+!srcds.py
+!rconOutput.txt

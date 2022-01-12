@@ -193,9 +193,15 @@ def notifyServerDown():
 def notifyPlayerOnline(name, status, lastLogOff):
     msg = f"Ark player {name} is now {status}."
     if lastLogOff is not None:
-        offlineDaysAgo = (datetime.datetime.now() - lastLogOff).days
-        offlineDate = lastLogOff.strftime("%A %d %b %Y %H:%M")
-        msg += f" Player went last offline on {offlineDate}, {offlineDaysAgo} days ago"
+        offlineTime = lastLogOff.strftime("%H:%M")
+        if datetime.datetime.now().strftime("%Y%m%d") == lastLogOff.strftime("%Y%m%d"):
+            msg += f" Player went last offline today at {offlineTime}"
+        elif (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y%m%d") == lastLogOff.strftime("%Y%m%d"):
+            msg += f" Player went last offline yesterday at {offlineTime}"
+        else:
+            offlineDaysAgo = (datetime.datetime.now() - lastLogOff).days
+            offlineDate = lastLogOff.strftime("%A %d %b %Y %H:%M")
+            msg += f" Player went last offline on {offlineDate}, {offlineDaysAgo} days ago"
     # print(msg)
     sendTelegramMsg(telegramBaseUrl + msg)
 

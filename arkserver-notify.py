@@ -3,7 +3,11 @@
 # this script uses the Source RCON client lib converted to Python 3.7 by Elektordi
 # https://gist.github.com/Elektordi/0132b4609d57b227a217232d2c6af80e
 
-import sqlite3, srcds, requests, datetime, re
+import datetime
+import re
+import requests
+import sqlite3
+import srcds
 
 # Rename config-default.py to config.py and configure the variables in that file
 import config
@@ -18,13 +22,15 @@ telegramBotToken = config.telegramBotToken
 telegramBotChatID = config.telegramBotChatID
 
 # Default script variables
+notifyOfflineIntervalH = 4
 dbName = 'ArkPlayerLog.db'
-dbTable = 'ark_player_log'
+playerTable = 'ark_player_log'
+statusTable = 'ark_server_status'
 telegramDownMsg = 'Ark server seems to be down, rcon connect failed.'
 telegramBaseUrl = ('https://api.telegram.org/bot' + telegramBotToken +
                    '/sendMessage?chat_id=' + telegramBotChatID + '&parse_mode=Markdown&text=')
 testRconFile = 'rconOutput.txt'
-
+arkServerId = 1
 
 def connectDB():
     try:
@@ -33,16 +39,23 @@ def connectDB():
         return sqliteConnection
     except sqlite3.Error as error:
         print("Error connecting to database:", error)
-
+        exit()
 
 def createTable(con):
-    sqlExists = f"SELECT COUNT(\"name\") FROM sqlite_master WHERE type='table' and name='{dbTable}'"
-    sqlCreate = f"""CREATE TABLE '{dbTable}' (
-                    steamId INTEGER PRIMARY KEY,
-                    name TEXT,
-                    last_logon TIMESTAMP,
-                    last_logoff TIMESTAMP,
-                    online_now BOOLEAN);"""
+    sqlExists = f"SELECT COUNT(\"name\") FROM sqlite_master WHERE type='table' and name='{playerTable}'"
+    sqlCreatePlayerTable = f"""CREATE TABLE '{playerTable}' (
+                            steamId INTEGER PRIMARY KEY,
+                            name TEXT,
+                            last_logon TIMESTAMP,
+                            last_logoff TIMESTAMP,
+                            online_now BOOLEAN);"""
+    sqlCreateStatusTable = f"""CREATE TABLE '{statusTable}' (
+                            serverId INTEGER PRIMARY KEY,
+                            checked_on TIMESTAMP,
+                            last_online TIMESTAMP,
+                            last_offline TIMESTAMP,
+                            server_online BOOLEAN);"""
+    sqlInsert = f"INSERT INTO \"{statusTable}\" (\"serverId\") VALUES (?);"
     cursor = con.cursor()
     try:
         # check if table exists
@@ -51,22 +64,38 @@ def createTable(con):
             # print(f"Table {dbTable} already exists, not recreating it")
             pass
         else:
-            cursor.execute(sqlCreate)
-            print(f"Created table {dbTable}")
+            cursor.execute(sqlCreatePlayerTable)
+            cursor.execute(sqlCreateStatusTable)
+            cursor.execute(sqlInsert, (arkServerId,))
+            con.commit()
+            print(f"Created tables {playerTable} and {statusTable}")
     except sqlite3.Error as error:
-        print(f"Error creating {dbTable} table:", error)
+        print(f"Error creating {playerTable} and/or {statusTable} table:", error)
     cursor.close()
 
 
-def fetchRconPlayerList():
+def fetchRconPlayerList(con):
+    online = 1
     try:
         rconServer = srcds.SourceRcon(rconIP, rconPort, rconPass)
-        rconResult = rconServer.rcon('listplayers')
+        rconResult = rconServer.rcon('listplayers').decode("utf-8")
     except srcds.SourceRconError as error:
+        online = 0
         print("Error retrieving playerlist via rcon: ", error)
         notifyServerDown()
+        rconResult = "No Players Connected"
+    if online == 1:
+        sqlUpdate = f"""UPDATE \"{statusTable}\" SET \"checked_on\" = ?,
+                            \"last_online\" = ?, \"server_online\" = ? WHERE \"serverId\" = ?"""
+    else:
+        sqlUpdate = f"""UPDATE \"{statusTable}\" SET \"checked_on\" = ?,
+                            \"last_offline\" = ?, \"server_online\" = ? WHERE \"serverId\" = ?"""
+    cursor = con.cursor()
+    cursor.execute(sqlUpdate, (datetime.datetime.now(), datetime.datetime.now(), online, arkServerId))
+    con.commit()
+    cursor.close()
     # writeRconResultToFile(rconResult)
-    return parseRconResult(rconResult.decode("utf-8"))
+    return parseRconResult(rconResult)
 
 
 def parseRconResult(rconResultStr):
@@ -84,7 +113,7 @@ def parseRconResult(rconResultStr):
 
 
 def insertUpdatePlayersDB(con, rconPlayerList):
-    sqlSelect = f"""SELECT * FROM \"{dbTable}\";"""
+    sqlSelect = f"""SELECT * FROM \"{playerTable}\";"""
     cursor = con.cursor()
     cursor.execute(sqlSelect)
     # update players that are already in the db
@@ -110,7 +139,7 @@ def insertUpdatePlayersDB(con, rconPlayerList):
 
 def insertPlayerRecord(con, playerInfo):
     print('Adding to db player ' + playerInfo['name'] + ' with steamid ' + str(playerInfo['steamid']))
-    sqlInsert = f"""INSERT INTO \"{dbTable}\" (\"steamId\", \"name\", \"last_logon\", \"online_now\") 
+    sqlInsert = f"""INSERT INTO \"{playerTable}\" (\"steamId\", \"name\", \"last_logon\", \"online_now\") 
                 VALUES (?, ?, ?, ?);"""
     cursor = con.cursor()
     data = (playerInfo['steamid'], playerInfo['name'], datetime.datetime.now(), 1)
@@ -123,10 +152,10 @@ def updatePlayerRecord(con, playerInfo):
     cursor = con.cursor()
     if playerInfo['online_now'] == 1:
         print('Now ONline: updating player ' + playerInfo['name'] + ' with steamid ' + str(playerInfo['steamid']))
-        sqlUpdate = f"UPDATE \"{dbTable}\" SET \"last_logon\" = ?, \"online_now\" = ? WHERE \"steamId\" = ?"
+        sqlUpdate = f"UPDATE \"{playerTable}\" SET \"last_logon\" = ?, \"online_now\" = ? WHERE \"steamId\" = ?"
     else:
         print('Now OFFline: updating player ' + playerInfo['name'] + ' with steamid ' + str(playerInfo['steamid']))
-        sqlUpdate = f"UPDATE \"{dbTable}\" SET \"last_logoff\" = ?, \"online_now\" = ? WHERE \"steamId\" = ?;"
+        sqlUpdate = f"UPDATE \"{playerTable}\" SET \"last_logoff\" = ?, \"online_now\" = ? WHERE \"steamId\" = ?;"
     try:
         cursor.execute(sqlUpdate, (datetime.datetime.now(), playerInfo['online_now'], playerInfo['steamid']))
         con.commit()
@@ -163,7 +192,7 @@ def testAddPlayersDB(con):
     playerList[76561190000000002] = "Ark master 1"
     #playerList[76561190000000003] = "Ark noob 2"
     playerList[76561190000000004] = "Ark master 2"
-    sqlInsert = f"""INSERT INTO \"{dbTable}\"
+    sqlInsert = f"""INSERT INTO \"{playerTable}\"
                 (\"steamId\", \"name\", \"last_logon\", \"last_logoff\", \"online_now\") 
                 VALUES (?, ?, ?, ?, ?);"""
     cursor = con.cursor()
@@ -177,7 +206,7 @@ def testAddPlayersDB(con):
 def testListPlayersDB(con):
     print('===== Players in database:')
     print('SteamID - Name - Last Logon - Last Logoff - Online now')
-    sqlSelect = f"SELECT * FROM \"{dbTable}\""
+    sqlSelect = f"SELECT * FROM \"{playerTable}\""
     cursor = con.cursor()
     cursor.execute(sqlSelect)
     records = cursor.fetchall()
@@ -225,15 +254,16 @@ def cleanAndClose(con):
     con.close()
     exit()
 
-#con.set_trace_callback(print)
+
 
 con = connectDB()
+#con.set_trace_callback(print)
 createTable(con)
 # testListPlayersDB(con)
 # fetchRconPlayerList()
 
-insertUpdatePlayersDB(con, fetchRconPlayerList())
-#insertUpdatePlayersDB(con, testFetchRConPlayerListFile())
+insertUpdatePlayersDB(con, fetchRconPlayerList(con))
+#insertUpdatePlayersDB(con, testFetchRConPlayerListFile(con))
 
 # testAddPlayersDB(con)
 # testListPlayersDB(con)

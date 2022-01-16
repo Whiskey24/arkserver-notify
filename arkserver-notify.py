@@ -36,6 +36,8 @@ def connectDB():
     try:
         sqliteConnection = sqlite3.connect(dbName,detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
         # print("Connected to SQLite")
+        # https://stackoverflow.com/questions/576933/how-can-i-reference-columns-by-their-names-in-python-calling-sqlite/20042292
+        sqliteConnection.row_factory = sqlite3.Row
         return sqliteConnection
     except sqlite3.Error as error:
         print("Error connecting to database:", error)
@@ -54,6 +56,7 @@ def createTable(con):
                             checked_on TIMESTAMP,
                             last_online TIMESTAMP,
                             last_offline TIMESTAMP,
+                            last_notified TIMESTAMP,
                             server_online BOOLEAN);"""
     sqlInsert = f"INSERT INTO \"{statusTable}\" (\"serverId\") VALUES (?);"
     cursor = con.cursor()
@@ -82,7 +85,7 @@ def fetchRconPlayerList(con):
     except srcds.SourceRconError as error:
         online = 0
         print("Error retrieving playerlist via rcon: ", error)
-        notifyServerDown()
+        notifyServerDown(con)
         rconResult = "No Players Connected"
     if online == 1:
         sqlUpdate = f"""UPDATE \"{statusTable}\" SET \"checked_on\" = ?,
@@ -215,7 +218,32 @@ def testListPlayersDB(con):
     cursor.close()
     print('=====')
 
-def notifyServerDown():
+def testListStatusDB(con):
+    print('===== Server status table in database:')
+    sqlSelect = f"SELECT * FROM \"{statusTable}\""
+    cursor = con.cursor()
+    cursor.execute(sqlSelect)
+    for row in cursor:
+        print(f"""
+        ServerId: {row['serverId']}
+        checked_on: {row['checked_on']}
+        last_online: {row['last_online']}
+        last_offline: {row['last_offline']}
+        last_notified: {row['last_notified']}
+        server_online: {row['server_online']}""")
+    cursor.close()
+    print('=====')
+
+
+def notifyServerDown(con):
+    sqlUpdate = f"UPDATE \"{statusTable}\" SET \"last_notified\" = ? WHERE serverId = ?;"
+    cursor = con.cursor()
+    try:
+        cursor.execute(sqlUpdate, (datetime.datetime.now(),arkServerId))
+        con.commit()
+    except sqlite3.Error as error:
+        print("Error updating last notified timestamp in db:", error)
+    cursor.close()
     sendTelegramMsg(telegramBaseUrl + telegramDownMsg)
 
 
@@ -267,5 +295,5 @@ insertUpdatePlayersDB(con, fetchRconPlayerList(con))
 
 # testAddPlayersDB(con)
 # testListPlayersDB(con)
-
+testListStatusDB(con)
 cleanAndClose(con)

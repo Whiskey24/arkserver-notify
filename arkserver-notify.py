@@ -22,7 +22,7 @@ telegramBotToken = config.telegramBotToken
 telegramBotChatID = config.telegramBotChatID
 
 # Default script variables
-notifyOfflineIntervalH = 4
+notifyOfflineIntervalH = 0.5
 dbName = 'ArkPlayerLog.db'
 playerTable = 'ark_player_log'
 statusTable = 'ark_server_status'
@@ -42,6 +42,7 @@ def connectDB():
     except sqlite3.Error as error:
         print("Error connecting to database:", error)
         exit()
+
 
 def createTable(con):
     sqlExists = f"SELECT COUNT(\"name\") FROM sqlite_master WHERE type='table' and name='{playerTable}'"
@@ -87,16 +88,7 @@ def fetchRconPlayerList(con):
         print("Error retrieving playerlist via rcon: ", error)
         notifyServerDown(con)
         rconResult = "No Players Connected"
-    if online == 1:
-        sqlUpdate = f"""UPDATE \"{statusTable}\" SET \"checked_on\" = ?,
-                            \"last_online\" = ?, \"server_online\" = ? WHERE \"serverId\" = ?"""
-    else:
-        sqlUpdate = f"""UPDATE \"{statusTable}\" SET \"checked_on\" = ?,
-                            \"last_offline\" = ?, \"server_online\" = ? WHERE \"serverId\" = ?"""
-    cursor = con.cursor()
-    cursor.execute(sqlUpdate, (datetime.datetime.now(), datetime.datetime.now(), online, arkServerId))
-    con.commit()
-    cursor.close()
+    updateServerStatus(con, online)
     # writeRconResultToFile(rconResult)
     return parseRconResult(rconResult)
 
@@ -218,6 +210,7 @@ def testListPlayersDB(con):
     cursor.close()
     print('=====')
 
+
 def testListStatusDB(con):
     print('===== Server status table in database:')
     sqlSelect = f"SELECT * FROM \"{statusTable}\""
@@ -236,8 +229,26 @@ def testListStatusDB(con):
 
 
 def notifyServerDown(con):
-    sqlUpdate = f"UPDATE \"{statusTable}\" SET \"last_notified\" = ? WHERE serverId = ?;"
     cursor = con.cursor()
+    # check if we should notify based on interval defined
+    sqlSelect = f"SELECT \"last_notified\" from \"{statusTable}\" WHERE serverId = ?;"
+    try:
+        cursor.execute(sqlSelect, (arkServerId,))
+        row = cursor.fetchone()
+    except sqlite3.Error as error:
+        print("Error reading last notified timestamp in db:", error)
+    if row['last_notified'] is not None:
+        stayQuietUntil = row['last_notified'] + datetime.timedelta(hours=notifyOfflineIntervalH)
+        if datetime.datetime.now() < stayQuietUntil:
+            print("Not sending offline notification, interval not yet exceeded")
+            return
+    print("Sending offline notification")
+    # print(f"Last notifed: {row['last_notified']}")
+    # print(f"interval: {notifyOfflineIntervalH}")
+    # print(f"don't notify until: {stayQuietUntil}")
+
+    print("TEST")
+    sqlUpdate = f"UPDATE \"{statusTable}\" SET \"last_notified\" = ? WHERE serverId = ?;"
     try:
         cursor.execute(sqlUpdate, (datetime.datetime.now(),arkServerId))
         con.commit()
@@ -245,6 +256,32 @@ def notifyServerDown(con):
         print("Error updating last notified timestamp in db:", error)
     cursor.close()
     sendTelegramMsg(telegramBaseUrl + telegramDownMsg)
+
+
+def updateServerStatus(con, is_online):
+    cursor = con.cursor()
+    # check if we should notify based on interval defined
+    sqlSelect = f"SELECT \"server_online\" from \"{statusTable}\" WHERE serverId = ?;"
+    try:
+        cursor.execute(sqlSelect, (arkServerId,))
+        row = cursor.fetchone()
+    except sqlite3.Error as error:
+        print("Error reading server online status in db:", error)
+    was_online = 0 if row['server_online'] is None else row['server_online']
+    if is_online == 1 and was_online == 0:
+        sendTelegramMsg(telegramBaseUrl + "Ark server is online.")
+        sqlUpdate = f"""UPDATE \"{statusTable}\" SET \"checked_on\" = ?,
+                            \"last_online\" = ?, \"server_online\" = ?, 
+                            \"last_notified\" = ? WHERE \"serverId\" = ?"""
+        cursor.execute(sqlUpdate, (datetime.datetime.now(), datetime.datetime.now(), is_online,
+                               datetime.datetime.now(), arkServerId))
+    else:
+        sqlUpdate = f"""UPDATE \"{statusTable}\" SET \"checked_on\" = ?,
+                            \"last_offline\" = ?, \"server_online\" = ? WHERE \"serverId\" = ?"""
+        cursor.execute(sqlUpdate, (datetime.datetime.now(), datetime.datetime.now(), is_online,
+                               arkServerId))
+    con.commit()
+    cursor.close()
 
 
 def notifyPlayerOnline(name, status, lastLogOff):
@@ -271,6 +308,7 @@ def notifyPlayerOffline(name, status, lastLogon):
     # print(msg)
     sendTelegramMsg(telegramBaseUrl + msg)
 
+
 def sendTelegramMsg(sendText):
     try:
         response = requests.get(sendText)
@@ -281,7 +319,6 @@ def sendTelegramMsg(sendText):
 def cleanAndClose(con):
     con.close()
     exit()
-
 
 
 con = connectDB()

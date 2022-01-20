@@ -22,7 +22,7 @@ telegramBotToken = config.telegramBotToken
 telegramBotChatID = config.telegramBotChatID
 
 # Default script variables
-notifyOfflineIntervalH = 0.5
+notifyOfflineIntervalH = 1
 dbName = 'ArkPlayerLog.db'
 playerTable = 'ark_player_log'
 statusTable = 'ark_server_status'
@@ -231,7 +231,7 @@ def testListStatusDB(con):
 def notifyServerDown(con):
     cursor = con.cursor()
     # check if we should notify based on interval defined
-    sqlSelect = f"SELECT \"last_notified\" from \"{statusTable}\" WHERE serverId = ?;"
+    sqlSelect = f"SELECT \"last_notified\", \"server_online\" from \"{statusTable}\" WHERE serverId = ?;"
     try:
         cursor.execute(sqlSelect, (arkServerId,))
         row = cursor.fetchone()
@@ -239,15 +239,10 @@ def notifyServerDown(con):
         print("Error reading last notified timestamp in db:", error)
     if row['last_notified'] is not None:
         stayQuietUntil = row['last_notified'] + datetime.timedelta(hours=notifyOfflineIntervalH)
-        if datetime.datetime.now() < stayQuietUntil:
+        if datetime.datetime.now() < stayQuietUntil and row['server_online'] == 0:
             print("Not sending offline notification, interval not yet exceeded")
             return
     print("Sending offline notification")
-    # print(f"Last notifed: {row['last_notified']}")
-    # print(f"interval: {notifyOfflineIntervalH}")
-    # print(f"don't notify until: {stayQuietUntil}")
-
-    print("TEST")
     sqlUpdate = f"UPDATE \"{statusTable}\" SET \"last_notified\" = ? WHERE serverId = ?;"
     try:
         cursor.execute(sqlUpdate, (datetime.datetime.now(),arkServerId))
@@ -269,6 +264,7 @@ def updateServerStatus(con, is_online):
         print("Error reading server online status in db:", error)
     was_online = 0 if row['server_online'] is None else row['server_online']
     if is_online == 1 and was_online == 0:
+        print("Ark server is (back) online")
         sendTelegramMsg(telegramBaseUrl + "Ark server is online.")
         sqlUpdate = f"""UPDATE \"{statusTable}\" SET \"checked_on\" = ?,
                             \"last_online\" = ?, \"server_online\" = ?, 
@@ -332,5 +328,5 @@ insertUpdatePlayersDB(con, fetchRconPlayerList(con))
 
 # testAddPlayersDB(con)
 # testListPlayersDB(con)
-testListStatusDB(con)
+# testListStatusDB(con)
 cleanAndClose(con)

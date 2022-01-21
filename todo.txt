@@ -2,4 +2,5 @@
 - Use exit status failed with message in case of problems (and check that ends up in the cron log)
 - Update all player status to offline when server goes offline
 - Add duration detail to when server comes back online / goes offline
+- Use column names in processing of all db results
 - Review/refactor server offline flow

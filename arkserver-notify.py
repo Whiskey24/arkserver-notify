@@ -7,6 +7,7 @@ import datetime
 import re
 import requests
 import sqlite3
+import os
 import srcds
 
 # Rename config-default.py to config.py and configure the variables in that file
@@ -24,6 +25,9 @@ telegramBotChatID = config.telegramBotChatID
 # Default script variables
 notifyOfflineIntervalH = 1
 dbName = 'ArkPlayerLog.db'
+dbLocation = os.path.dirname(os.path.realpath(__file__))
+dbPath = os.path.join(dbLocation, dbName)
+
 playerTable = 'ark_player_log'
 statusTable = 'ark_server_status'
 telegramDownMsg = 'Ark server seems to be down, rcon connect failed.'
@@ -34,7 +38,7 @@ arkServerId = 1
 
 def connectDB():
     try:
-        sqliteConnection = sqlite3.connect(dbName,detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+        sqliteConnection = sqlite3.connect(dbPath,detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
         # print("Connected to SQLite")
         # https://stackoverflow.com/questions/576933/how-can-i-reference-columns-by-their-names-in-python-calling-sqlite/20042292
         sqliteConnection.row_factory = sqlite3.Row

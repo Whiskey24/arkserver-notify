@@ -7,38 +7,55 @@ import datetime
 import re
 import requests
 import sqlite3
-import os
 import srcds
-
-# Rename config-default.py to config.py and configure the variables in that file
-import config
-
-# Ark server specific variables, configured in config.py
-rconIP = config.rconIP
-rconPort = config.rconPort
-rconPass = config.rconPass
-
-# Telegram chat specific variables, configured in config.py
-telegramBotToken = config.telegramBotToken
-telegramBotChatID = config.telegramBotChatID
+import os
+import sys
+import configparser
+import json
 
 # Default script variables
 notifyOfflineIntervalH = 1
-dbName = 'ArkPlayerLog.db'
-dbLocation = os.path.dirname(os.path.realpath(__file__))
-dbPath = os.path.join(dbLocation, dbName)
-
 playerTable = 'ark_player_log'
 statusTable = 'ark_server_status'
-telegramDownMsg = 'Ark server seems to be down, rcon connect failed.'
-telegramBaseUrl = ('https://api.telegram.org/bot' + telegramBotToken +
-                   '/sendMessage?chat_id=' + telegramBotChatID + '&parse_mode=Markdown&text=')
-testRconFile = 'rconOutput.txt'
-arkServerId = 1
 
-def connectDB():
+def changeToWorkingDir():
     try:
-        sqliteConnection = sqlite3.connect(dbPath,detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+        dir = os.path.dirname(sys.argv[0])
+        os.chdir(dir)
+    except IOError as error:
+        print(f"Error changing to working directory using given file location {sys.argv[0]}:", error)
+        exit()
+    return dir
+
+def createDbDir(dbDir):
+    if not os.path.exists(dbDir):
+        os.makedirs(dbDir)
+    return dbDir
+
+# Read config
+def readConfig():
+    config = configparser.ConfigParser()
+    config.read('config.ini')  
+    servers = []
+    for s in config.sections():
+        if not s.startswith('server:'):
+             continue
+
+        serverid = s[7:]
+        if not serverid.isdigit():
+            print(f"Cannot convert serverid \"{serverid}\" to integer, check the config, only integers are allowed after \"server:\"")
+            exit()
+        server = dict(config.items(s))
+        server['id'] = serverid
+        server['dbname'] = "ark-%02d.db" % int(serverid)
+        server['rconport'] = int(server['rconport'])
+        servers.append(server)
+        #print(json.dumps(servers, indent=4))
+    return servers
+
+def connectDB(dbName):
+    try:
+        sqliteConnection = sqlite3.connect(dbName,detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
         # print("Connected to SQLite")
         # https://stackoverflow.com/questions/576933/how-can-i-reference-columns-by-their-names-in-python-calling-sqlite/20042292
         sqliteConnection.row_factory = sqlite3.Row
@@ -48,7 +65,7 @@ def connectDB():
         exit()
 
 
-def createTable(con):
+def createTable(con,arkServerId):
     sqlExists = f"SELECT COUNT(\"name\") FROM sqlite_master WHERE type='table' and name='{playerTable}'"
     sqlCreatePlayerTable = f"""CREATE TABLE '{playerTable}' (
                             steamId INTEGER PRIMARY KEY,
@@ -76,23 +93,23 @@ def createTable(con):
             cursor.execute(sqlCreateStatusTable)
             cursor.execute(sqlInsert, (arkServerId,))
             con.commit()
-            print(f"Created tables {playerTable} and {statusTable}")
+            print(f"Created tables {playerTable} and {statusTable} for server {arkServerId}")
     except sqlite3.Error as error:
         print(f"Error creating {playerTable} and/or {statusTable} table:", error)
     cursor.close()
 
 
-def fetchRconPlayerList(con):
+def fetchRconPlayerList(con, server):
     online = 1
     try:
-        rconServer = srcds.SourceRcon(rconIP, rconPort, rconPass)
+        rconServer = srcds.SourceRcon(server['rconip'], server['rconport'], server['rconpass'])
         rconResult = rconServer.rcon('listplayers').decode("utf-8")
     except srcds.SourceRconError as error:
         online = 0
         print("Error retrieving playerlist via rcon: ", error)
-        notifyServerDown(con)
+        notifyServerDown(con, server)
         rconResult = "No Players Connected"
-    updateServerStatus(con, online)
+    updateServerStatus(con, server, online)
     # writeRconResultToFile(rconResult)
     return parseRconResult(rconResult)
 
@@ -111,7 +128,7 @@ def parseRconResult(rconResultStr):
     return rconPlayerList
 
 
-def insertUpdatePlayersDB(con, rconPlayerList):
+def insertUpdatePlayersDB(con, server, rconPlayerList):
     sqlSelect = f"""SELECT * FROM \"{playerTable}\";"""
     cursor = con.cursor()
     cursor.execute(sqlSelect)
@@ -121,19 +138,19 @@ def insertUpdatePlayersDB(con, rconPlayerList):
         if row[0] in rconPlayerList.keys() and row[4] == 0:
             # player has come online
             updatePlayerRecord(con, {'steamid': row[0], 'name': row[1], 'online_now': 1})
-            notifyPlayerOnline(row[1], 'online', row[3])
+            notifyPlayerOnline(row[1], 'online', row[3], server)
             del rconPlayerList[row[0]]
         elif row[0] not in rconPlayerList.keys() and row[4] == 1:
             # player has gone offline
             updatePlayerRecord(con, {'steamid': row[0], 'name': row[1], 'online_now': 0})
-            notifyPlayerOffline(row[1], 'offline', row[2])
+            notifyPlayerOffline(row[1], 'offline', row[2], server)
         elif row[0] in rconPlayerList.keys():
             # player is still online, no update in db needed
             del rconPlayerList[row[0]]
     # insert any remaining players in the Rcon list as new records
     for key, value in rconPlayerList.items():
         insertPlayerRecord(con, {'steamid': key, 'name': value})
-        notifyPlayerOnline(value, 'online', None)
+        notifyPlayerOnline(value, 'online', None, server)
 
 
 def insertPlayerRecord(con, playerInfo):
@@ -232,12 +249,12 @@ def testListStatusDB(con):
     print('=====')
 
 
-def notifyServerDown(con):
+def notifyServerDown(con, server):
     cursor = con.cursor()
     # check if we should notify based on interval defined
     sqlSelect = f"SELECT \"last_notified\", \"server_online\" from \"{statusTable}\" WHERE serverId = ?;"
     try:
-        cursor.execute(sqlSelect, (arkServerId,))
+        cursor.execute(sqlSelect, (server['id'],))
         row = cursor.fetchone()
     except sqlite3.Error as error:
         print("Error reading last notified timestamp in db:", error)
@@ -249,43 +266,43 @@ def notifyServerDown(con):
     print("Sending offline notification")
     sqlUpdate = f"UPDATE \"{statusTable}\" SET \"last_notified\" = ? WHERE serverId = ?;"
     try:
-        cursor.execute(sqlUpdate, (datetime.datetime.now(),arkServerId))
+        cursor.execute(sqlUpdate, (datetime.datetime.now(),server['id']))
         con.commit()
     except sqlite3.Error as error:
         print("Error updating last notified timestamp in db:", error)
     cursor.close()
-    sendTelegramMsg(telegramBaseUrl + telegramDownMsg)
+    sendTelegramMsg(server, "Server \"" + server['name'] + "\" seems to be offline, rcon connect failed.")
 
 
-def updateServerStatus(con, is_online):
+def updateServerStatus(con, server, is_online):
     cursor = con.cursor()
     # check if we should notify based on interval defined
     sqlSelect = f"SELECT \"server_online\" from \"{statusTable}\" WHERE serverId = ?;"
     try:
-        cursor.execute(sqlSelect, (arkServerId,))
+        cursor.execute(sqlSelect, (server['id'],))
         row = cursor.fetchone()
     except sqlite3.Error as error:
         print("Error reading server online status in db:", error)
     was_online = 0 if row['server_online'] is None else row['server_online']
     if is_online == 1 and was_online == 0:
-        print("Ark server is (back) online")
-        sendTelegramMsg(telegramBaseUrl + "Ark server is online.")
+        print(f"Server {server['name']} is (back) online")
+        sendTelegramMsg(server, "Server \"" + server['name'] + "\" is online.")
         sqlUpdate = f"""UPDATE \"{statusTable}\" SET \"checked_on\" = ?,
                             \"last_online\" = ?, \"server_online\" = ?, 
                             \"last_notified\" = ? WHERE \"serverId\" = ?"""
         cursor.execute(sqlUpdate, (datetime.datetime.now(), datetime.datetime.now(), is_online,
-                               datetime.datetime.now(), arkServerId))
+                               datetime.datetime.now(), server['id']))
     else:
         sqlUpdate = f"""UPDATE \"{statusTable}\" SET \"checked_on\" = ?,
                             \"last_offline\" = ?, \"server_online\" = ? WHERE \"serverId\" = ?"""
         cursor.execute(sqlUpdate, (datetime.datetime.now(), datetime.datetime.now(), is_online,
-                               arkServerId))
+                               server['id']))
     con.commit()
     cursor.close()
 
 
-def notifyPlayerOnline(name, status, lastLogOff):
-    msg = f"Ark player {name} is now {status}."
+def notifyPlayerOnline(name, status, lastLogOff, server):
+    msg = f"Server {server['name']}\nArk player {name} is now {status}."
     if lastLogOff is not None:
         offlineTime = lastLogOff.strftime("%H:%M")
         if datetime.datetime.now().strftime("%Y%m%d") == lastLogOff.strftime("%Y%m%d"):
@@ -297,21 +314,23 @@ def notifyPlayerOnline(name, status, lastLogOff):
             offlineDate = lastLogOff.strftime("%A %d %b %Y %H:%M")
             msg += f" Player went last offline on {offlineDate}, {offlineDaysAgo} days ago"
     # print(msg)
-    sendTelegramMsg(telegramBaseUrl + msg)
+    sendTelegramMsg(server, msg)
 
 
-def notifyPlayerOffline(name, status, lastLogon):
-    msg = f"Ark player {name} is now {status}."
+def notifyPlayerOffline(name, status, lastLogon, server):
+    msg = f"Server {server['name']}\nArk player {name} is now {status}."
     if lastLogon is not None:
         timeOnline = ':'.join(str(datetime.datetime.now() - lastLogon).split(':')[:2])
         msg += f" Player was online for {timeOnline}."
     # print(msg)
-    sendTelegramMsg(telegramBaseUrl + msg)
+    sendTelegramMsg(server, msg)
 
 
-def sendTelegramMsg(sendText):
+def sendTelegramMsg(server, sendText):
+    telegramUrl = ('https://api.telegram.org/bot' + server['telegrambottoken'] +
+                       '/sendMessage?chat_id=' + server['telegrambotchatid'] + '&parse_mode=Markdown&text=' + sendText)
     try:
-        response = requests.get(sendText)
+        response = requests.get(telegramUrl)
     except requests.exceptions.RequestException as error:
         print("Error sending Telegram notification: ", error)
 
@@ -321,7 +340,21 @@ def cleanAndClose(con):
     exit()
 
 
-con = connectDB()
+
+CurrentDir = changeToWorkingDir()
+dbDir = createDbDir("db")
+servers = readConfig()
+
+for server in servers:
+    print(f"==== Server {server['id']}: {server['name']} ====")
+    print(json.dumps(server, indent=4))
+    con = connectDB(os.path.join(dbDir,server['dbname']))
+    createTable(con,server['id'])
+    #list = fetchRconPlayerList(con, server)
+    insertUpdatePlayersDB(con, server, fetchRconPlayerList(con, server))
+    
+exit()
+
 #con.set_trace_callback(print)
 createTable(con)
 # testListPlayersDB(con)
@@ -334,3 +367,4 @@ insertUpdatePlayersDB(con, fetchRconPlayerList(con))
 # testListPlayersDB(con)
 # testListStatusDB(con)
 cleanAndClose(con)
+

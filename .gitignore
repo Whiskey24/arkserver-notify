@@ -4,6 +4,6 @@
 # But not these files...
 !.gitignore
 !arkserver-notify.py
-!config-default.py
+!config-default.ini
 !srcds.py
 !rconOutput.txt

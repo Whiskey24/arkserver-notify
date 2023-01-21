@@ -201,14 +201,14 @@ def getOnlinePlayersFromDb(con, server):
     
 def formatOnlinePlayersMsg(onlinePlayers):
     if len(onlinePlayers) == 0:
-        return "No other players online"
+        return "No other players online."
     elif len(onlinePlayers) == 1:
         str = "There is 1 player online:\n"
     else:
         str = f"There are {len(onlinePlayers)} players online:\n"
     for player in onlinePlayers:
         totalSec = int((datetime.datetime.now() - player['lastLogon']).total_seconds())
-        str += f"{player['name']} since {player['lastLogon'].strftime('%H:%M')} ({totalSecToHourMin(totalSec)})"
+        str += f"{player['name']} since {player['lastLogon'].strftime('%H:%M')} ({totalSecToHourMin(totalSec)})\n"
     return str
 
 

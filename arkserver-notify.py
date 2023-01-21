@@ -17,6 +17,9 @@ import json
 notifyOfflineIntervalH = 1
 playerTable = 'ark_player_log'
 statusTable = 'ark_server_status'
+printTelegram = False       # set to False if running as cron job
+sendTelegram = True        # can set to False for development 
+printInfoToScreen = False   # set to False if running as cron job
 
 def changeToWorkingDir():
     try:
@@ -93,7 +96,7 @@ def createTable(con,arkServerId):
             cursor.execute(sqlCreateStatusTable)
             cursor.execute(sqlInsert, (arkServerId,))
             con.commit()
-            print(f"Created tables {playerTable} and {statusTable} for server {arkServerId}")
+            printInfo(f"Created tables {playerTable} and {statusTable} for server {arkServerId}")
     except sqlite3.Error as error:
         print(f"Error creating {playerTable} and/or {statusTable} table:", error)
     cursor.close()
@@ -111,13 +114,13 @@ def fetchRconPlayerList(con, server):
         rconResult = "No Players Connected"
     updateServerStatus(con, server, online)
     # writeRconResultToFile(rconResult)
-    return parseRconResult(rconResult)
+    return parseRconResult(rconResult, server)
 
 
-def parseRconResult(rconResultStr):
+def parseRconResult(rconResultStr, server):
     rconPlayerList = {}
     if 'No Players Connected' in rconResultStr:
-        print("Server reports no players online")
+        printInfo(f"Server {server['name']} reports no players online")
         return rconPlayerList
     lines = rconResultStr.splitlines()
     for line in lines:
@@ -138,23 +141,23 @@ def insertUpdatePlayersDB(con, server, rconPlayerList):
         if row[0] in rconPlayerList.keys() and row[4] == 0:
             # player has come online
             updatePlayerRecord(con, {'steamid': row[0], 'name': row[1], 'online_now': 1})
-            notifyPlayerOnline(row[1], 'online', row[3], server)
+            notifyPlayerOnline(row[1], 'online', row[3], server, con)
             del rconPlayerList[row[0]]
         elif row[0] not in rconPlayerList.keys() and row[4] == 1:
             # player has gone offline
             updatePlayerRecord(con, {'steamid': row[0], 'name': row[1], 'online_now': 0})
-            notifyPlayerOffline(row[1], 'offline', row[2], server)
+            notifyPlayerOffline(row[1], 'offline', row[2], server, con)
         elif row[0] in rconPlayerList.keys():
             # player is still online, no update in db needed
             del rconPlayerList[row[0]]
     # insert any remaining players in the Rcon list as new records
     for key, value in rconPlayerList.items():
         insertPlayerRecord(con, {'steamid': key, 'name': value})
-        notifyPlayerOnline(value, 'online', None, server)
+        notifyPlayerOnline(value, 'online', None, server, con)
 
 
 def insertPlayerRecord(con, playerInfo):
-    print('Adding to db player ' + playerInfo['name'] + ' with steamid ' + str(playerInfo['steamid']))
+    printInfo('Adding to db player ' + playerInfo['name'] + ' with steamid ' + str(playerInfo['steamid']))
     sqlInsert = f"""INSERT INTO \"{playerTable}\" (\"steamId\", \"name\", \"last_logon\", \"online_now\") 
                 VALUES (?, ?, ?, ?);"""
     cursor = con.cursor()
@@ -167,10 +170,10 @@ def insertPlayerRecord(con, playerInfo):
 def updatePlayerRecord(con, playerInfo):
     cursor = con.cursor()
     if playerInfo['online_now'] == 1:
-        print('Now ONline: updating player ' + playerInfo['name'] + ' with steamid ' + str(playerInfo['steamid']))
+        printInfo('Now ONline: updating player ' + playerInfo['name'] + ' with steamid ' + str(playerInfo['steamid']))
         sqlUpdate = f"UPDATE \"{playerTable}\" SET \"last_logon\" = ?, \"online_now\" = ? WHERE \"steamId\" = ?"
     else:
-        print('Now OFFline: updating player ' + playerInfo['name'] + ' with steamid ' + str(playerInfo['steamid']))
+        printInfo('Now OFFline: updating player ' + playerInfo['name'] + ' with steamid ' + str(playerInfo['steamid']))
         sqlUpdate = f"UPDATE \"{playerTable}\" SET \"last_logoff\" = ?, \"online_now\" = ? WHERE \"steamId\" = ?;"
     try:
         cursor.execute(sqlUpdate, (datetime.datetime.now(), playerInfo['online_now'], playerInfo['steamid']))
@@ -178,6 +181,35 @@ def updatePlayerRecord(con, playerInfo):
     except sqlite3.Error as error:
         print("Error updating player info:", error)
     cursor.close()
+  
+
+def getOnlinePlayersFromDb(con, server):
+    cursor = con.cursor()
+    onlinePlayers = []
+    # print(f"Getting online players for server {server['id']}")
+    # get online players from db
+    sqlSelect = f"SELECT * from \"{playerTable}\" WHERE online_now = 1;"
+    try:
+        cursor.execute(sqlSelect)
+    except sqlite3.Error as error:
+        print("Error reading playerlist in db:", error)
+    for row in cursor:
+        # print(f"player {row[1]}")
+        onlinePlayers.append({'name': row[1], 'lastLogon': row[2]})
+    return onlinePlayers
+
+    
+def formatOnlinePlayersMsg(onlinePlayers):
+    if len(onlinePlayers) == 0:
+        return "No other players online"
+    elif len(onlinePlayers) == 1:
+        str = "There is 1 player online:\n"
+    else:
+        str = f"There are {len(onlinePlayers)} players online:\n"
+    for player in onlinePlayers:
+        totalSec = int((datetime.datetime.now() - player['lastLogon']).total_seconds())
+        str += f"{player['name']} since {player['lastLogon'].strftime('%H:%M')} ({totalSecToHourMin(totalSec)})"
+    return str
 
 
 def writeRconResultToFile(rconResult):
@@ -261,7 +293,7 @@ def notifyServerDown(con, server):
     if row['last_notified'] is not None:
         stayQuietUntil = row['last_notified'] + datetime.timedelta(hours=notifyOfflineIntervalH)
         if datetime.datetime.now() < stayQuietUntil and row['server_online'] == 0:
-            print("Not sending offline notification, interval not yet exceeded")
+            printInfo("Not sending offline notification, interval not yet exceeded")
             return
     print("Sending offline notification")
     sqlUpdate = f"UPDATE \"{statusTable}\" SET \"last_notified\" = ? WHERE serverId = ?;"
@@ -285,7 +317,7 @@ def updateServerStatus(con, server, is_online):
         print("Error reading server online status in db:", error)
     was_online = 0 if row['server_online'] is None else row['server_online']
     if is_online == 1 and was_online == 0:
-        print(f"Server {server['name']} is (back) online")
+        printInfo(f"Server {server['name']} is (back) online")
         sendTelegramMsg(server, "Server \"" + server['name'] + "\" is online.")
         sqlUpdate = f"""UPDATE \"{statusTable}\" SET \"checked_on\" = ?,
                             \"last_online\" = ?, \"server_online\" = ?, 
@@ -301,7 +333,7 @@ def updateServerStatus(con, server, is_online):
     cursor.close()
 
 
-def notifyPlayerOnline(name, status, lastLogOff, server):
+def notifyPlayerOnline(name, status, lastLogOff, server, con):
     msg = f"Server {server['name']}\nArk player {name} is now {status}."
     if lastLogOff is not None:
         offlineTime = lastLogOff.strftime("%H:%M")
@@ -313,32 +345,41 @@ def notifyPlayerOnline(name, status, lastLogOff, server):
             offlineDaysAgo = (datetime.datetime.now() - lastLogOff).days
             offlineDate = lastLogOff.strftime("%A %d %b %Y %H:%M")
             msg += f" Player went last offline on {offlineDate}, {offlineDaysAgo} days ago"
-    # print(msg)
+    msg += "\n" + formatOnlinePlayersMsg(getOnlinePlayersFromDb(con, server))
     sendTelegramMsg(server, msg)
 
 
-def notifyPlayerOffline(name, status, lastLogon, server):
+def notifyPlayerOffline(name, status, lastLogon, server, con):
     msg = f"Server {server['name']}\nArk player {name} is now {status}."
     if lastLogon is not None:
         timeOnline = ':'.join(str(datetime.datetime.now() - lastLogon).split(':')[:2])
         msg += f" Player was online for {timeOnline}."
-    # print(msg)
+    msg += "\n" + formatOnlinePlayersMsg(getOnlinePlayersFromDb(con, server))
     sendTelegramMsg(server, msg)
 
 
 def sendTelegramMsg(server, sendText):
     telegramUrl = ('https://api.telegram.org/bot' + server['telegrambottoken'] +
                        '/sendMessage?chat_id=' + server['telegrambotchatid'] + '&parse_mode=Markdown&text=' + sendText)
-    try:
-        response = requests.get(telegramUrl)
-    except requests.exceptions.RequestException as error:
-        print("Error sending Telegram notification: ", error)
+    if printTelegram:
+        print(f"Telegram message:\n==========\n{sendText}\n==========\n")
+    if sendTelegram:
+        try:
+            response = requests.get(telegramUrl)
+        except requests.exceptions.RequestException as error:
+            print("Error sending Telegram notification: ", error)
 
 
-def cleanAndClose(con):
-    con.close()
-    exit()
+def totalSecToHourMin(seconds):
+    hours = seconds // (60*60)
+    secLeft = seconds - (hours * 60 * 60)
+    min = secLeft // 60
+    return f"{hours}u{min}m"
 
+
+def printInfo(text):
+    if printInfoToScreen:
+        print(text)
 
 
 CurrentDir = changeToWorkingDir()
@@ -346,25 +387,11 @@ dbDir = createDbDir("db")
 servers = readConfig()
 
 for server in servers:
-    print(f"==== Server {server['id']}: {server['name']} ====")
-    print(json.dumps(server, indent=4))
+    # print(f"==== Server {server['id']}: {server['name']} ====")
+    # print(json.dumps(server, indent=4))
     con = connectDB(os.path.join(dbDir,server['dbname']))
     createTable(con,server['id'])
-    #list = fetchRconPlayerList(con, server)
     insertUpdatePlayersDB(con, server, fetchRconPlayerList(con, server))
+    con.close()
     
 exit()
-
-#con.set_trace_callback(print)
-createTable(con)
-# testListPlayersDB(con)
-# fetchRconPlayerList()
-
-insertUpdatePlayersDB(con, fetchRconPlayerList(con))
-#insertUpdatePlayersDB(con, testFetchRConPlayerListFile(con))
-
-# testAddPlayersDB(con)
-# testListPlayersDB(con)
-# testListStatusDB(con)
-cleanAndClose(con)
-
